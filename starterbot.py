@@ -1,70 +1,101 @@
 import os
-import time
 import re
-from slackclient import SlackClient
+import sys
+import logging
+from slack_bolt import App
+from slack_bolt.adapter.socket_mode import SocketModeHandler
 
+# Load environment variables from .env if present
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-# instantiate Slack client
-slack_client = SlackClient(os.environ.get('SLACK_BOT_TOKEN'))
-# starterbot's user ID in Slack: value is assigned after the bot starts up
-starterbot_id = None
+# Configure logging to provide clear diagnostics and avoid missing-handler warnings
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger("starterbot")
 
-# constants
-RTM_READ_DELAY = 1 # 1 second delay between reading from RTM
+# Constants
 EXAMPLE_COMMAND = "do"
-MENTION_REGEX = "^<@(|[WU].+?)>(.*)"
 
-def parse_bot_commands(slack_events):
-    """
-        Parses a list of events coming from the Slack RTM API to find bot commands.
-        If a bot command is found, this function returns a tuple of command and channel.
-        If its not found, then this function returns None, None.
-    """
-    for event in slack_events:
-        if event["type"] == "message" and not "subtype" in event:
-            user_id, message = parse_direct_mention(event["text"])
-            if user_id == starterbot_id:
-                return message, event["channel"]
-    return None, None
+# Retrieve tokens
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
+SLACK_APP_TOKEN = os.environ.get("SLACK_APP_TOKEN")
 
-def parse_direct_mention(message_text):
-    """
-        Finds a direct mention (a mention that is at the beginning) in message text
-        and returns the user ID which was mentioned. If there is no direct mention, returns None
-    """
-    matches = re.search(MENTION_REGEX, message_text)
-    # the first group contains the username, the second group contains the remaining message
-    return (matches.group(1), matches.group(2).strip()) if matches else (None, None)
 
-def handle_command(command, channel):
-    """
-        Executes bot command if the command is known
-    """
-    # Default response is help text for the user
-    default_response = "Not sure what you mean. Try *{}*.".format(EXAMPLE_COMMAND)
+def validate_tokens():
+    """Validates that necessary Slack tokens are present and correctly formatted."""
+    missing = []
+    if not SLACK_BOT_TOKEN:
+        missing.append("- SLACK_BOT_TOKEN is missing. Requires a Bot User OAuth Token (starts with 'xoxb-').")
+    elif not SLACK_BOT_TOKEN.startswith("xoxb-"):
+        logger.warning("SLACK_BOT_TOKEN usually starts with 'xoxb-'. Ensure you are using a Bot Token, not a User Token.")
 
-    # Finds and executes the given command, filling in response
+    if not SLACK_APP_TOKEN:
+        missing.append("- SLACK_APP_TOKEN is missing. Requires an App-Level Token for Socket Mode (starts with 'xapp-').")
+    elif not SLACK_APP_TOKEN.startswith("xapp-"):
+        logger.warning("SLACK_APP_TOKEN usually starts with 'xapp-'. Ensure you are using an App-Level Token.")
+
+    if missing:
+        logger.error("Configuration Error:\n" + "\n".join(missing))
+        logger.error("Set these variables in your environment or a local .env file. See README.md for setup instructions.")
+        sys.exit(1)
+
+
+validate_tokens()
+
+# Initialize Slack Bolt App
+app = App(token=SLACK_BOT_TOKEN)
+
+
+def handle_command(command, say):
+    """Executes bot command if the command is known."""
+    default_response = f"Not sure what you mean. Try *{EXAMPLE_COMMAND}*."
     response = None
-    # This is where you start to implement more commands!
+
+    # This is where you can implement more commands!
     if command.startswith(EXAMPLE_COMMAND):
         response = "Sure...write some more code then I can do that!"
 
-    # Sends the response back to the channel
-    slack_client.api_call(
-        "chat.postMessage",
-        channel=channel,
-        text=response or default_response
-    )
+    say(response or default_response)
+
+
+@app.event("app_mention")
+def handle_app_mention_events(body, say, logger):
+    """
+    Handles when the bot is mentioned in a channel.
+    Strips the leading mention tag and processes the remaining text as a command.
+    """
+    text = body.get("event", {}).get("text", "")
+    # Remove leading <@USERID> mention
+    command = re.sub(r"^<@.+?>\s*", "", text).strip()
+    logger.info(f"Received mention command: {command}")
+    handle_command(command, say)
+
+
+@app.event("message")
+def handle_message_events(body, say, logger):
+    """
+    Handles direct messages sent to the bot (channel_type == 'im').
+    Ignores message subtypes like edits or system messages.
+    """
+    event = body.get("event", {})
+    if event.get("channel_type") == "im" and "subtype" not in event:
+        command = event.get("text", "").strip()
+        logger.info(f"Received direct message command: {command}")
+        handle_command(command, say)
+
 
 if __name__ == "__main__":
-    if slack_client.rtm_connect(with_team_state=False):
-        print("Starter Bot connected and running!")
-        # Read bot's user ID by calling Web API method `auth.test`
-        starterbot_id = slack_client.api_call("auth.test")["user_id"]
-        while True:
-            command, channel = parse_bot_commands(slack_client.rtm_read())
-            if command:
-                handle_command(command, channel)
-            time.sleep(RTM_READ_DELAY)
-    else:
-        print("Connection failed. Exception traceback printed above.")
+    logger.info("Connecting to Slack via Socket Mode...")
+    try:
+        handler = SocketModeHandler(app, SLACK_APP_TOKEN)
+        logger.info("⚡ Starter Bot is connected and running!")
+        handler.start()
+    except Exception as e:
+        logger.exception("Failed to connect or run Starter Bot: %s", e)
+        sys.exit(1)
