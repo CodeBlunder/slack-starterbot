@@ -72,3 +72,6 @@ target/
 # Virtual environments
 .venv/
 venv/
+
+# IDE settings
+.vscode/
